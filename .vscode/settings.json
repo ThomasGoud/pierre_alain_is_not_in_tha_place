@@ -1,0 +1,9 @@
+{
+    "python.linting.pylintEnabled": true,
+    "python.linting.enabled": true,
+    "python.linting.pylintArgs": [
+        "--max-line-length=180"
+    ],
+    "python.analysis.autoImportCompletions": true,
+    "editor.rulers": [180],
+}

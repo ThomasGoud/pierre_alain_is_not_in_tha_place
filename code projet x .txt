@@ -1,0 +1,439 @@
+
+setwd("C:/Users/Andrea/Desktop/POST DOC APP ADEME/projet 2024-2026/BD spatialisées/agriculture/autonomie_06")
+
+library(sf)
+library(units)
+library(dplyr)
+library(mapview)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(osrm)
+
+## Calculer les distances routieres ----
+
+# Importer les couches
+from <- st_read('oc.shp')
+to <- st_read('fi.shp')
+route <- read.csv('routes_totales.csv')
+
+length(unique(from$id_oc))
+length(unique(to$id_fi))
+
+route <- subset(route, route$distance_km < 10)
+
+#route <- r1
+
+route <- arrange(route, route$distance_km)
+
+# OSMR
+x <- as.numeric(ncol(route)+1)
+y <- x+4
+
+for(i in x[1]:nrow(route)){
+  route[i,x:y] <- osrmRoute(src = c(route[i,"X1"], route[i,"Y1"]), 
+                            dst = c(route[i,"X2"], route[i,"Y2"]),
+                            overview = "full",
+                            osrm.profile = "car")
+}
+
+# Nb : les distances indiquees sont en km et le temps de trajet en minutes
+sum(is.na(route$distance)) # v?rifier le nombre d'?checs
+
+r1 <- subset(route, is.na(route$distance==TRUE))
+
+route <- subset(route, is.na(route$distance)==FALSE) # ne garder que les liens qui ont fonctionn?
+
+# Pour cr?er un objet g?ographique, on va d'abord cr?er un objet sfc_LINESTRING
+route$geometry <- st_sfc(route$geometry, crs = 4326)
+
+# puis on transforme en un objet sf
+route <- st_as_sf(route, sf_column_name = "geometry")
+
+route <- st_transform(route, crs = 2154) # Convertir depuis WGS84 vers Lambert 93
+
+mapview(route,
+        alpha = 0.2,
+        lwd = 2, # linewidth = epaisseur de ligne
+        map.types = 'CartoDB.DarkMatter') # d?finir la basemap = fond de carte
+
+from <- st_drop_geometry(from)
+to <- st_drop_geometry(to)
+
+# Convertir en 4326
+from <- st_as_sf(from, coords = c('X','Y'), crs= 2154)
+to <- st_as_sf(to, coords = c('X','Y'), crs= 2154)
+from <- st_transform(from, 4326)
+to <- st_transform(to, 4326)
+xy_from <- as.data.frame(st_coordinates(from$geometry)) # fonction st_coordinates()
+xy_to <- as.data.frame(st_coordinates(to$geometry))
+colnames(xy_from) <- c("X1", "Y1") # Renommer les colonnes
+colnames(xy_to) <- c("X2", "Y2")
+from <- cbind(from, xy_from)
+to <- cbind(to, xy_to)
+
+from <- st_drop_geometry(from)
+to <- st_drop_geometry(to)
+
+# Id uniques
+from$from <- seq.int(nrow(from))
+to$to <- seq.int(nrow(to))
+from$id_from <- from$id
+to$id_to <- to$id
+
+# Renommer les colonnes
+x <- which(colnames(from) == 'leg_Tan')
+y <- which(colnames(from) == 'fru_Tan')
+colnames(from)[x] <- 'PL_Tan'
+colnames(from)[y] <- 'PF_Tan'
+x <- which(colnames(to) == 'leg_Tan')
+y <- which(colnames(to) == 'fru_Tan')
+colnames(to)[x] <- 'CL_Tan'
+colnames(to)[y] <- 'CF_Tan'
+
+# Ajouter les colonnes utiles
+route <- merge(route, from[,c('id_from','id_oc', 'from', 'PL_Tan','PF_Tan')], by='from', all.x=TRUE)
+route <- merge(route, to[,c('id_to', 'id_fi', 'to', 'CL_Tan','CF_Tan')], by='to', all.x=TRUE)
+
+#write_sf(route, 'routes_osm.shp')
+
+## Calculer les ratios besoin/ demande ----
+
+#route <- st_read('routes_osm.shp')
+
+x <- which(colnames(route)=='duratin')
+colnames(route)[x] <- 'duration'
+colnames(route)[x+1] <- 'distance'
+colnames(route)[x+2] <- 'id_oc'
+colnames(route)[x+3] <- 'id_from'
+colnames(route)[x+4] <- 'PL_Tan'
+colnames(route)[x+5] <- 'PF_Tan'
+colnames(route)[x+6] <- 'if_fi'
+colnames(route)[x+7] <- 'id_to'
+colnames(route)[x+8] <- 'CL_Tan'
+colnames(route)[x+9] <- 'CF_Tan'
+
+# Importer les couches
+#from <- st_read('oc.shp')
+#to <- st_read('fi.shp')
+
+x <- which(colnames(route)=='duration') # ordonner les distances routieres dans l'ordre croissant
+#route <- route[,c(x:ncol(route))]
+
+# Ordonner les observations selon la distance d?croissante
+route <- arrange(route, route$distance)
+
+# initiation des colonnes besoins et compl?tions
+to$bsnL <- to$CL_Tan
+to$bsnF <- to$CF_Tan
+to$cptL <- ''
+to$cptF <- ''
+
+route <- st_drop_geometry(route)
+
+for(i in 1:nrow(route)){
+  
+  psi <- route$id_from[i] # identifier producteur et consommateur
+  csi <- route$id_to[i]
+  
+  x <- which(from$id_from == psi)
+  y <- which(to$id_to == csi)
+  
+  offreL <- from$PL_Tan[x] # offre
+  offreF <- from$PF_Tan[x]
+  
+  demL <- to$CL_Tan[y] # demande
+  demF <- to$CF_Tan[y]
+  
+  difL <- offreL - demL # difference entre offre et demande
+  difF <- offreF - demF
+  
+  if(difL > 0){ # exc?dent d'offre
+    from$PL_Tan[x] <- difL # ce qu'il reste au producteur
+    to$CL_Tan[y] <- 0 } # besoin qu'il reste ? compl?ter pour le consommateur
+  if(difF > 0){
+    from$PF_Tan[x] <- difF
+    to$CF_Tan[y] <- 0 }
+  
+  if(difL == 0){ # ?galit? offre /demande
+    from$PL_Tan[x] <- 0 
+    to$CL_Tan[y] <- 0 }
+  if(difF == 0){
+    from$PF_Tan[x] <- 0
+    to$CF_Tan[y] <- 0 }
+  
+  if(difL < 0){ # exc?dent de demande
+    from$PL_Tan[x] <- 0 
+    to$CL_Tan[y] <- (demL - offreL) }
+  if(difF < 0){
+    from$PF_Tan[x] <- 0
+    to$CF_Tan[y] <- (demF - offreF) }
+  
+  # compl?tion du besoin pour le consommateur
+  to$cptL[y] <- as.numeric((1-(to$CL_Tan[y] / to$bsnL[y])) * 100)
+  to$cptF[y] <- as.numeric((1-(to$CF_Tan[y] / to$bsnF[y])) * 100)
+  
+  # km parcourus
+  if(offreL > 0){
+    route$km_parcourus[i] <- route$distance[i]
+  }
+  if(offreF > 0){
+    route$km_parcourus[i] <- route$distance[i]
+  }
+}
+
+route <- subset(route, route$km_parcourus > 0)
+
+#write.csv(from, 'from_restants.csv')
+#write.csv(to, 'to_restants.csv')
+#write.csv(r1, 'binomes_a_calculer.csv')
+#write.csv(route, 'routes_10km_1.csv')
+
+# Compl?ter les calculs manquants ----
+
+# Routes OSM ----
+from <- read.csv('from_restants.csv')
+to <- read.csv('to_restants.csv')
+
+from2 <- from
+
+# Identifier les lieux de production o? il reste des quantit?s de produits disponibles
+from2$reste <- (from2$PL_Tan + from2$PF_Tan)
+from2 <- subset(from2, from2$reste > 0)
+from2 <- unique(from2$from)
+
+# Ouvrir toutes les routes et extraire ces lieux de production
+route <- read.csv('routes_totales.csv')
+
+route <- route %>% filter(route$from %in% from2)
+
+# S?lectionner un subset un peu plus grand pour la suite des calculs
+route <- subset(route, route$distance_km > 35)
+route <- subset(route, route$distance_km < 45) # max(route$distance)
+
+route$X1 <- as.numeric(route$X1)
+route$Y1 <- as.numeric(route$Y1)
+route$X2 <- as.numeric(route$X2)
+route$Y2 <- as.numeric(route$Y2)
+
+goal <- nrow(route)
+goal
+
+# OSMR
+x <- as.numeric(ncol(route)+1)
+y <- x+4
+for(i in 1:nrow(route)){
+  route[i,x:y] <- osrmRoute(src = c(route[i,"X1"], route[i,"Y1"]), 
+                            dst = c(route[i,"X2"], route[i,"Y2"]),
+                            overview = "full",
+                            osrm.profile = "car")
+}
+
+# Nb : les distances indiquees sont en km et le temps de trajet en minutes
+sum(is.na(route$distance)) # v?rifier le nombre d'?checs
+route <- subset(route, is.na(route$distance)==FALSE) # ne garder que les liens qui ont fonctionn?
+
+# Pour cr?er un objet g?ographique, on va d'abord cr?er un objet sfc_LINESTRING
+route$geometry <- st_sfc(route$geometry, crs = 4326)
+
+# puis on transforme en un objet sf
+route <- st_as_sf(route, sf_column_name = "geometry")
+
+route <- st_transform(route, crs = 2154) # Convertir depuis WGS84 vers Lambert 93
+
+# Ajouter les colonnes utiles
+route <- merge(route, from[,c('from','id_oc', 'id_from', 'PL_Tan','PF_Tan')], by='from', all.x=TRUE)
+route <- merge(route, to[,c('to','id_fi', 'id_to', 'CL_Tan','CF_Tan')], by='to', all.x=TRUE)
+
+# Compl?tion et distances ----
+
+r1 <- read.csv('routes_completes.csv')
+
+route <- st_drop_geometry(route)
+
+route$ft <- paste(route$id_oc, route$id_fi, sep='-')
+r1$ft <- paste(r1$id_oc, r1$id_fi, sep='-')
+
+x <- which(colnames(route)=='duration')
+route <- route[,c(x:ncol(route))]
+x <- which(colnames(r1)=='duration')
+r1 <- r1[,c(x:ncol(r1))]
+
+route$km_parcourus <- ''
+
+# Harmoniser les colonnes et rbind
+colnames(route)
+colnames(r1)
+
+#x <- which(colnames(r1)=='duratin')
+#colnames(r1)[x] <- 'duration'
+#colnames(r1)[x+1] <- 'distance'
+#colnames(r1)[x+2] <- 'id_oc'
+#colnames(r1)[x+3] <- 'id_from'
+#colnames(r1)[x+4] <- 'PL_Tan'
+#colnames(r1)[x+5] <- 'PF_Tan'
+#colnames(r1)[x+6] <- 'id_fi'
+#colnames(r1)[x+7] <- 'id_to'
+#colnames(r1)[x+8] <- 'CL_Tan'
+#colnames(r1)[x+9] <- 'CF_Tan'
+
+route2 <- rbind(route, r1)
+
+# Eviter les duplicates
+route2 <- route2[!duplicated(route2$ft),]
+
+route <- route2
+
+# Importer les couches
+from <- st_read('oc.shp')
+to <- st_read('fi.shp')
+
+from <- st_drop_geometry(from)
+to <- st_drop_geometry(to)
+
+# Convertir en 4326
+from <- st_as_sf(from, coords = c('X','Y'), crs= 2154)
+to <- st_as_sf(to, coords = c('X','Y'), crs= 2154)
+from <- st_transform(from, 4326)
+to <- st_transform(to, 4326)
+xy_from <- as.data.frame(st_coordinates(from$geometry)) # fonction st_coordinates()
+xy_to <- as.data.frame(st_coordinates(to$geometry))
+colnames(xy_from) <- c("X1", "Y1") # Renommer les colonnes
+colnames(xy_to) <- c("X2", "Y2")
+from <- cbind(from, xy_from)
+to <- cbind(to, xy_to)
+
+from <- st_drop_geometry(from)
+to <- st_drop_geometry(to)
+
+# Id uniques
+from$from <- seq.int(nrow(from))
+to$to <- seq.int(nrow(to))
+from$id_from <- from$id
+to$id_to <- to$id
+
+# Renommer les colonnes
+x <- which(colnames(from) == 'leg_Tan')
+y <- which(colnames(from) == 'fru_Tan')
+colnames(from)[x] <- 'PL_Tan'
+colnames(from)[y] <- 'PF_Tan'
+x <- which(colnames(to) == 'leg_Tan')
+y <- which(colnames(to) == 'fru_Tan')
+colnames(to)[x] <- 'CL_Tan'
+colnames(to)[y] <- 'CF_Tan'
+
+x <- which(colnames(route)=='duration')
+route <- route[,c(x:ncol(route))]
+
+# Ordonner les observations selon la distance d?croissante
+route <- arrange(route, route$distance)
+
+# initiation des colonnes besoins et compl?tions
+to$bsnL <- to$CL_Tan
+to$bsnF <- to$CF_Tan
+to$cptL <- ''
+to$cptF <- ''
+
+route <- st_drop_geometry(route)
+
+route$km_parcourus <- 0 # initialiser ? 0
+
+for(i in 1:nrow(route)){
+  
+  psi <- route$id_from[i] # identifier producteur et consommateur
+  csi <- route$id_to[i]
+  
+  x <- which(from$id_from == psi)
+  y <- which(to$id_to == csi)
+  
+  offreL <- from$PL_Tan[x] # offre
+  offreF <- from$PF_Tan[x]
+  
+  demL <- to$CL_Tan[y] # demande
+  demF <- to$CF_Tan[y]
+  
+  difL <- offreL - demL # difference entre offre et demande
+  difF <- offreF - demF
+  
+  if(difL > 0){ # exc?dent d'offre
+    from$PL_Tan[x] <- difL # ce qu'il reste au producteur
+    to$CL_Tan[y] <- 0 } # besoin qu'il reste ? compl?ter pour le consommateur
+  if(difF > 0){
+    from$PF_Tan[x] <- difF
+    to$CF_Tan[y] <- 0 }
+  
+  if(difL == 0){ # ?galit? offre /demande
+    from$PL_Tan[x] <- 0 
+    to$CL_Tan[y] <- 0 }
+  if(difF == 0){
+    from$PF_Tan[x] <- 0
+    to$CF_Tan[y] <- 0 }
+  
+  if(difL < 0){ # exc?dent de demande
+    from$PL_Tan[x] <- 0 
+    to$CL_Tan[y] <- (demL - offreL) }
+  if(difF < 0){
+    from$PF_Tan[x] <- 0
+    to$CF_Tan[y] <- (demF - offreF) }
+  
+  # compl?tion du besoin pour le consommateur
+  to$cptL[y] <- as.numeric((1-(to$CL_Tan[y] / to$bsnL[y])) * 100)
+  to$cptF[y] <- as.numeric((1-(to$CF_Tan[y] / to$bsnF[y])) * 100)
+  
+  # km parcourus
+  if(offreL > 0){
+    route$km_parcourus[i] <- route$distance[i]
+  }
+  if(offreF > 0){
+    route$km_parcourus[i] <- route$distance[i]
+  }
+}
+
+write.csv(from, 'from_restants.csv')
+write.csv(to, 'to_restants.csv')
+
+test <- subset(route, route$km_parcourus != 0) # km_parcourus
+test$ft <- paste(test$id_from, test$id_to)
+
+write.csv(test, 'routes_completes.csv')
+
+sum(test$km_parcourus)
+
+## Visualiser les r?sultats ----
+
+# Importer filosofi
+
+from <- read.csv('from_restants.csv')
+to <- read.csv('to_restants.csv')
+
+filo <- st_read('filosofi_geom.shp')
+
+filo <- merge(filo, to[,c('id_fi','cptL','cptF')], by= 'id_fi', all.x=TRUE)
+
+filo$cptL <- as.numeric(filo$cptL)
+filo$cptF <- as.numeric(filo$cptF)
+
+sum(is.na(filo$cptL))
+
+#filo <- subset(filo, is.na(filo$cptL) == FALSE)
+
+filo <- st_as_sf(filo, st_column_name = 'geometry')
+
+mapview(filo,
+        zcol = 'cptL',
+        #col.region = c('white','darkgreen'),
+        #col.region = c('red','darkgreen'),
+        col.region = viridis(200),
+        #map.types = 'CartoDB.DarkMatter',
+        alpha = 0,
+        alpha.regions = 0.6)
+
+mapview(filo,
+        zcol = 'cptF',
+        #col.region = c('white','orange'),
+        #col.region = c('','orange'),
+        col.region = viridis(100),
+        
+        #map.types = 'CartoDB.DarkMatter',
+        alpha = 0,
+        alpha.regions = 0.6)
