@@ -5,10 +5,18 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Main",
+            "name": "a_calculate_distances",
             "type": "debugpy",
             "request": "launch",
             "program": "a_calculate_distances.py",
+            "python": "/home/goudemt/miniconda3/bin/python",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "b_process_results",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "b_process_results.py",
             "python": "/home/goudemt/miniconda3/bin/python",
             "console": "integratedTerminal"
         }

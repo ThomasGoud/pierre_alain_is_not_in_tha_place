@@ -47,7 +47,7 @@ Les fichiers de données utilisés dans ce projet sont :
 - **fi.shp** : Fichier shapefile contenant les points destinations (consommateurs).
 - **routes_avec_osrm.csv** : Résultats des distances calculées par l'OSRM, généré par le script **a_calculate_distances.py**.
 
-## Résultatb
+## Résultats
 
 Les fichiers suivants sont générés à la fin du processus :
 
@@ -58,4 +58,4 @@ Les fichiers suivants sont générés à la fin du processus :
 
 ## Contact
 
-Pour toute question ou problème, veuillez me contacter à **votre.email@example.com**.
+Pour toute question ou problème, veuillez me contacter avec des pizzas.

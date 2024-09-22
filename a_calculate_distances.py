@@ -7,28 +7,26 @@ import requests
 from tqdm import tqdm
 import pandas as pd
 
-def osrm_table(src_coords, dst_coords, profile='car'):
+def osrm_route(src_coord, dst_coord, profile='car'):
     """
-    Appelle l'API OSRM en mode "table" pour obtenir les distances et durées entre plusieurs paires de points.
+    Appelle l'API OSRM en mode "route" pour obtenir la distance et la durée entre une paire de points.
 
     Args:
-        src_coords (list): Liste des coordonnées source sous forme [(lon1, lat1), (lon2, lat2), ...].
-        dst_coords (list): Liste des coordonnées destination sous forme [(lon1, lat1), (lon2, lat2), ...].
+        src_coord (tuple): Coordonnées source sous forme (lon, lat).
+        dst_coord (tuple): Coordonnées destination sous forme (lon, lat).
         profile (str): Le profil de véhicule à utiliser pour les calculs (par défaut : 'car').
 
     Returns:
-        tuple: Retourne deux listes, l'une pour les distances et l'autre pour les durées.
+        tuple: Retourne la distance (en mètres) et la durée (en secondes) entre src_coord et dst_coord.
     """
-    src_str = ";".join([f"{lon},{lat}" for lon, lat in src_coords])
-    dst_str = ";".join([f"{lon},{lat}" for lon, lat in dst_coords])
-
-    url = f'http://localhost:5000/table/v1/{profile}/{src_str};{dst_str}?annotations=distance,duration'
+    url = f'http://localhost:5000/route/v1/{profile}/{src_coord[0]},{src_coord[1]};{dst_coord[0]},{dst_coord[1]}?overview=false&steps=false'
     try:
         response = requests.get(url)
         if response.status_code == 200:
             data = response.json()
-            if 'durations' in data and 'distances' in data:
-                return data['distances'], data['durations']
+            if 'routes' in data:
+                route = data['routes'][0]
+                return route['distance'], route['duration']
         else:
             print(f"Erreur de réponse : {response.text}")
         return None, None
@@ -36,51 +34,34 @@ def osrm_table(src_coords, dst_coords, profile='car'):
         print(f"Erreur lors de l'appel à l'API OSRM : {e}")
         return None, None
 
-def process_batch(batch):
+def process_pair(src_coord, dst_coord, index):
     """
-    Traite chaque batch de données en appelant l'API OSRM pour obtenir les distances et durées.
+    Traite une paire source-destination en appelant l'API OSRM pour obtenir la distance et la durée.
 
     Args:
-        batch (pd.DataFrame): Un DataFrame contenant un sous-ensemble de données de trajets.
+        src_coord (tuple): Coordonnées source (lon, lat).
+        dst_coord (tuple): Coordonnées destination (lon, lat).
+        index (int): Index de la paire dans le DataFrame.
 
     Returns:
-        list: Une liste de dictionnaires contenant les distances et durées calculées pour chaque paire source-destination.
+        dict: Un dictionnaire contenant l'index, la distance et la durée calculées pour la paire source-destination.
     """
-    src_coords = list(zip(batch['X1'], batch['Y1']))
-    dst_coords = list(zip(batch['X2'], batch['Y2']))
+    dist, dur = osrm_route(src_coord, dst_coord)
 
-    # Appeler l'API OSRM en mode "table"
-    distances, durations = osrm_table(src_coords, dst_coords)
+    # Si une réponse a été obtenue, stocker les résultats
+    result = {
+        'index': index,
+        'osrm_distance_km': dist / 1000 if dist else None,  # Convertir en km
+        'osrm_duration_min': dur / 60 if dur else None      # Convertir en minutes
+    }
+    return result
 
-    # Si une réponse a été obtenue, mettre à jour les résultats dans le DataFrame
-    results = []
-    if distances and durations:
-        # Assurez-vous que chaque src[i] correspond à dst[i]
-        for j in range(len(batch)):
-            try:
-                # Ici on traite chaque paire source-destination correspondante
-                dist = distances[j][0]  # Seule la distance src[i] -> dst[i] nous intéresse
-                dur = durations[j][0]   # Pareil pour la durée src[i] -> dst[i]
-
-                results.append({
-                    'index': batch.index[j],
-                    'osrm_distance_km': dist / 1000,  # Convertir en km
-                    'osrm_duration_min': dur / 60     # Convertir en minutes
-                })
-            except Exception as e:
-                print(f"Erreur lors du traitement du résultat pour l'index {batch.index[j]}: {e}")
-    else:
-        print(f"Pas de réponse valide pour le batch avec l'index {batch.index.tolist()}")
-
-    return results
-
-def process_in_parallel(route, batch_size=100, max_workers=30):
+def process_in_parallel(route, max_workers=30):
     """
-    Traite les requêtes par lots en parallèle en utilisant ThreadPoolExecutor.
+    Traite les requêtes en parallèle en utilisant ThreadPoolExecutor.
 
     Args:
-        route (pandas dataframe): routes extraites
-        batch_size (int): Taille des lots à traiter.
+        route (pandas dataframe): DataFrame des routes avec coordonnées source et destination.
         max_workers (int): Nombre maximum de threads pour le traitement parallèle.
 
     Returns:
@@ -90,13 +71,14 @@ def process_in_parallel(route, batch_size=100, max_workers=30):
     results = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for i in tqdm(range(0, len(route), batch_size), desc="Processing batches in parallel"):
-            batch = route.iloc[i:i + batch_size]
-            futures.append(executor.submit(process_batch, batch))
+        for index, row in tqdm(route.iterrows(), total=route.shape[0], desc="Processing pairs in parallel"):
+            src_coord = (row['X1'], row['Y1'])
+            dst_coord = (row['X2'], row['Y2'])
+            futures.append(executor.submit(process_pair, src_coord, dst_coord, index))
 
         # Récupérer les résultats au fur et à mesure de la complétion des futures
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processing futures"):
-            results.extend(future.result())
+            results.append(future.result())
 
     return results
 
@@ -118,7 +100,7 @@ def main():
     route['osrm_duration_min'] = None
 
     # Traiter les requêtes par lots en parallèle
-    results = process_in_parallel(route, batch_size=50, max_workers=10)
+    results = process_in_parallel(route, max_workers=30)
 
     # Mise à jour du DataFrame avec les résultats
     for result in results:
@@ -133,5 +115,5 @@ def main():
     route.to_csv('routes_avec_osrm.csv', index=False)
     print("Finished")
 
-if __name__=='__main__':
+if __name__ == '__main__':
     main()
