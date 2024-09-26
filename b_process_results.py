@@ -130,7 +130,7 @@ def calculer_besoins_et_offre(from_data, to_data, routes):
         to_data.loc[to_data['id_to'] == id_to, 'cptF'] = (1 - (to_data.loc[to_data['id_to'] == id_to, 'CF_Tan'].values[0] / demande_fru)) * 100
 
         # Mise à jour des kilomètres parcourus
-        routes.loc[i, 'km_parcourus'] = routes.loc[i, 'osrm_distance_km']
+        routes.loc[i, 'km_parcourus'] = routes.loc[i, 'distance_km']
 
     return from_data, to_data, routes
 

@@ -34,6 +34,42 @@ def osrm_route(src_coord, dst_coord, profile='car'):
         print(f"Erreur lors de l'appel à l'API OSRM : {e}")
         return None, None
 
+def osrm_table_batch(src_coords, dst_coords, profile='car'):
+    """
+    Appelle l'API OSRM en mode "table" pour obtenir la distance et la durée entre plusieurs paires de points en une seule requête.
+    
+    Args:
+        src_coords (list): Liste des coordonnées sources sous forme [(lon, lat), (lon, lat), ...].
+        dst_coords (list): Liste des coordonnées destinations sous forme [(lon, lat), (lon, lat), ...].
+        profile (str): Le profil de véhicule à utiliser pour les calculs (par défaut : 'car').
+    
+    Returns:
+        list: Liste des tuples (distance, durée) pour chaque paire source-destination.
+    """
+    src_str = ";".join([f"{coord[0]},{coord[1]}" for coord in src_coords])
+    dst_str = ";".join([f"{coord[0]},{coord[1]}" for coord in dst_coords])
+
+    # Ajout du paramètre 'annotations=distance,duration' pour obtenir les distances ET durées
+    url = f'http://localhost:5000/table/v1/{profile}/{src_str};{dst_str}?annotations=distance,duration'
+    
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            # Vérification que 'distances' et 'durations' existent bien dans la réponse
+            if 'distances' in data and 'durations' in data:
+                distances = data['distances']
+                durations = data['durations']
+                # Extraction des résultats pour chaque paire source-destination correspondante
+                results = [(distances[i][i + len(src_coords)], durations[i][i + len(src_coords)]) for i in range(len(src_coords))]
+                return results
+        else:
+            print(f"Erreur de réponse : {response.text}")
+        return None
+    except Exception as e:
+        print(f"Erreur lors de l'appel à l'API OSRM : {e}")
+        return None
+
 def process_pair(src_coord, dst_coord, index):
     """
     Traite une paire source-destination en appelant l'API OSRM pour obtenir la distance et la durée.
@@ -48,17 +84,40 @@ def process_pair(src_coord, dst_coord, index):
     """
     dist, dur = osrm_route(src_coord, dst_coord)
 
-    # Si une réponse a été obtenue, stocker les résultats
     result = {
         'index': index,
-        'osrm_distance_km': dist / 1000 if dist else None,  # Convertir en km
-        'osrm_duration_min': dur / 60 if dur else None      # Convertir en minutes
+        'distance_km': dist / 1000 if dist else None,  # Convertir en km
+        'duration_min': dur / 60 if dur else None      # Convertir en minutes
     }
     return result
 
+def process_batch(src_coords, dst_coords):
+    """
+    Traite plusieurs paires source-destination en une seule requête OSRM via l'API "table".
+
+    Args:
+        src_coords (list): Liste des coordonnées source (lon, lat).
+        dst_coords (list): Liste des coordonnées destination (lon, lat).
+
+    Returns:
+        list: Liste des dictionnaires contenant l'index, la distance et la durée pour chaque paire source-destination.
+    """
+    batch_results = osrm_table_batch(src_coords, dst_coords)
+    if batch_results:
+        results = []
+        for index, (dist, dur) in enumerate(batch_results):
+            results.append({
+                'index': index,
+                'distance_km': dist / 1000 if dist else None,
+                'duration_min': dur / 60 if dur else None
+            })
+        return results
+    else:
+        return []
+
 def process_in_parallel(route, max_workers=30):
     """
-    Traite les requêtes en parallèle en utilisant ThreadPoolExecutor.
+    Traite les requêtes en parallèle en utilisant ThreadPoolExecutor pour les appels individuels à osrm_route.
 
     Args:
         route (pandas dataframe): DataFrame des routes avec coordonnées source et destination.
@@ -76,11 +135,38 @@ def process_in_parallel(route, max_workers=30):
             dst_coord = (row['X2'], row['Y2'])
             futures.append(executor.submit(process_pair, src_coord, dst_coord, index))
 
-        # Récupérer les résultats au fur et à mesure de la complétion des futures
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processing futures"):
             results.append(future.result())
 
     return results
+
+def compare_batch_vs_parallel(route):
+    """
+    Compare le temps et les résultats entre le traitement batch et les appels individuels en parallèle pour 4 paires.
+
+    Args:
+        route (pandas dataframe): DataFrame des routes avec coordonnées source et destination.
+
+    Returns:
+        dict: Un dictionnaire contenant les résultats des deux méthodes (batch vs appels individuels).
+    """
+    # Extraire les premières 4 paires
+    route_extract = route[:10]
+    src_coords = [(row['X1'], row['Y1']) for _, row in route_extract.iterrows()]
+    dst_coords = [(row['X2'], row['Y2']) for _, row in route_extract.iterrows()]
+
+    # Appels batch (osrm_table)
+    print("Traitement batch...")
+    batch_results = process_batch(src_coords, dst_coords)
+
+    # Appels individuels en parallèle (osrm_route)
+    print("Traitement parallèle...")
+    parallel_results = process_in_parallel(route_extract)
+    parallel_results = sorted(parallel_results, key=lambda x: x['index'])
+    return {
+        "batch_results": batch_results,
+        "parallel_results": parallel_results
+    }
 
 def main():
     """
@@ -89,26 +175,21 @@ def main():
     # Lecture du fichier CSV
     route = pd.read_csv('routes_totales.csv')
 
-    # Filtrer les routes avec une distance inférieure à 10 km
-    route = route[route['distance_km'] < 10]
-
-    # Trier les routes par distance croissante
-    route = route.sort_values('distance_km').reset_index(drop=True)
-
     # Ajouter des colonnes pour stocker les résultats OSRM
-    route['osrm_distance_km'] = None
-    route['osrm_duration_min'] = None
+    route['distance_km'] = None
+    route['duration_min'] = None
 
     # Traiter les requêtes par lots en parallèle
+    compare_batch_vs_parallel(route)
     results = process_in_parallel(route, max_workers=30)
 
     # Mise à jour du DataFrame avec les résultats
     for result in results:
-        route.at[result['index'], 'osrm_distance_km'] = result['osrm_distance_km']
-        route.at[result['index'], 'osrm_duration_min'] = result['osrm_duration_min']
+        route.at[result['index'], 'distance_km'] = result['distance_km']
+        route.at[result['index'], 'duration_min'] = result['duration_min']
 
     # Vérifier le nombre d'échecs
-    num_failures = route['osrm_distance_km'].isna().sum()
+    num_failures = route['distance_km'].isna().sum()
     print(f"Nombre d'échecs : {num_failures}")
 
     # Sauvegarder les résultats si nécessaire
