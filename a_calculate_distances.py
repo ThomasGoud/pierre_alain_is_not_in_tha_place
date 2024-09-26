@@ -7,33 +7,35 @@ import requests
 from tqdm import tqdm
 import pandas as pd
 
-def osrm_table_batch(src_coords, dst_coords, profile='car'):
+def osrm_route(src_coords, dst_coords, profile='car', overview='full'):
     """
-    Appelle l'API OSRM en mode "table" pour obtenir la distance et la durée entre plusieurs paires de points en une seule requête.
+    Appelle l'API OSRM en mode "route" pour obtenir l'itinéraire complet entre une source et une destination.
 
     Args:
-        src_coords (list): Liste des coordonnées sources sous forme [(lon, lat), (lon, lat), ...].
-        dst_coords (list): Liste des coordonnées destinations sous forme [(lon, lat), (lon, lat), ...].
+        src_coords (tuple): Coordonnées source sous forme (lon, lat).
+        dst_coords (tuple): Coordonnées destination sous forme (lon, lat).
         profile (str): Le profil de véhicule à utiliser pour les calculs (par défaut : 'car').
+        overview (str): Niveau de détail de la géométrie de l'itinéraire ('full', 'simplified' ou 'false').
 
     Returns:
-        list: Liste des tuples (distance, durée) pour chaque paire source-destination.
+        dict: Un dictionnaire avec la distance, la durée et la géométrie (polyline).
     """
-    src_str = ";".join([f"{coord[0]},{coord[1]}" for coord in src_coords])
-    dst_str = ";".join([f"{coord[0]},{coord[1]}" for coord in dst_coords])
-
-    # Ajout du paramètre 'annotations=distance,duration' pour obtenir les distances ET durées
-    url = f'http://localhost:5000/table/v1/{profile}/{src_str};{dst_str}?annotations=distance,duration'
-
+    src_str = f"{src_coords[0]},{src_coords[1]}"
+    dst_str = f"{dst_coords[0]},{dst_coords[1]}"
+    
+    url = f'http://localhost:5000/route/v1/{profile}/{src_str};{dst_str}?overview={overview}&geometries=polyline'
+    
     try:
         response = requests.get(url)
         if response.status_code == 200:
             data = response.json()
-            if 'distances' in data and 'durations' in data:
-                distances = data['distances']
-                durations = data['durations']
-                results = [(distances[i][i + len(src_coords)], durations[i][i + len(src_coords)]) for i in range(len(src_coords))]
-                return results
+            if 'routes' in data and len(data['routes']) > 0:
+                route = data['routes'][0]  # Récupère la première route
+                return {
+                    'distance': route['distance'],
+                    'duration': route['duration'],
+                    'geometry': route['geometry']
+                }
         else:
             print(f"Erreur de réponse : {response.text}")
         return None
